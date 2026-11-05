@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
 import pandas as pd
+import requests
+import json
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel, Field
@@ -209,45 +211,146 @@ def next_day():
 
 
 
-class InstitutionalInputs(BaseModel):
-    fii_cash_net_cr: Optional[float] = None
-    dii_cash_net_cr: Optional[float] = None
-    fii_index_futures_long: Optional[float] = None
-    fii_index_futures_short: Optional[float] = None
-    fii_index_options_call_oi: Optional[float] = None
-    fii_index_options_put_oi: Optional[float] = None
 
-_institutional = {}
+# NSE daily FII/FPI and DII cash-market activity.
+# NSE's public endpoint is not a guaranteed API; access can be rate-limited or changed.
+_NSE_FII_DII_URL = 'https://www.nseindia.com/api/fiidiiTradeReact'
+_FII_HISTORY_FILE = os.getenv('FII_HISTORY_FILE', '/tmp/kk_fii_dii_history.json')
+_fii_cache = {'updated_at': None, 'rows': None}
+_fii_lock = threading.Lock()
 
-@app.post('/market/institutional-inputs')
-def save_institutional_inputs(data: InstitutionalInputs):
-    global _institutional
-    _institutional = data.model_dump(exclude_none=True)
-    return {'saved': True, 'fields_received': list(_institutional.keys()),
-            'note': 'FII/DII figures are manually supplied; update with the latest official exchange data.'}
+def _num(value):
+    try:
+        return float(str(value).replace(',', '').replace('₹', '').strip())
+    except Exception:
+        return None
+
+def _nse_fii_dii_fetch():
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://www.nseindia.com/reports/fii-dii',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    session = requests.Session()
+    session.headers.update(headers)
+    # Establish cookies before calling NSE's report endpoint.
+    session.get('https://www.nseindia.com/', timeout=12)
+    response = session.get(_NSE_FII_DII_URL, timeout=15)
+    response.raise_for_status()
+    payload = response.json()
+    records = payload if isinstance(payload, list) else payload.get('data', [])
+    parsed = []
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        category = str(item.get('category', item.get('type', item.get('investorType', '')))).upper()
+        if not any(tag in category for tag in ('FII', 'FPI', 'DII')):
+            continue
+        buy = _num(item.get('buyValue', item.get('buy', item.get('buy_value'))))
+        sell = _num(item.get('sellValue', item.get('sell', item.get('sell_value'))))
+        net = _num(item.get('netValue', item.get('net', item.get('net_value'))))
+        if net is None and buy is not None and sell is not None:
+            net = buy - sell
+        if net is None:
+            continue
+        parsed.append({
+            'date': item.get('date', item.get('tradingDate', datetime.now(IST).date().isoformat())),
+            'category': 'FII' if ('FII' in category or 'FPI' in category) else 'DII',
+            'buy_cr': buy, 'sell_cr': sell, 'net_cr': net
+        })
+    if not parsed:
+        raise ValueError('NSE response format changed or contains no FII/DII rows')
+    return parsed
+
+def _load_fii_history():
+    try:
+        with open(_FII_HISTORY_FILE, 'r') as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _save_fii_history(rows):
+    try:
+        with open(_FII_HISTORY_FILE, 'w') as f:
+            json.dump(rows[-30:], f)
+    except Exception:
+        pass
+
+def _get_fii_dii_data(force=False):
+    now = datetime.now(IST)
+    with _fii_lock:
+        updated = _fii_cache.get('updated_at')
+        if not force and updated and (now - updated).total_seconds() < 900 and _fii_cache.get('rows') is not None:
+            return _fii_cache['rows'], 'cache'
+        latest = _nse_fii_dii_fetch()
+        history = _load_fii_history()
+        # One record per date/category; latest NSE value replaces same-day provisional value.
+        by_key = {(str(x.get('date')), x.get('category')): x for x in history if isinstance(x, dict)}
+        for row in latest:
+            by_key[(str(row['date']), row['category'])] = row
+        history = sorted(by_key.values(), key=lambda x: str(x.get('date')), reverse=True)[:30]
+        _save_fii_history(history)
+        _fii_cache['updated_at'] = now
+        _fii_cache['rows'] = history
+        return history, 'NSE India official report endpoint'
 
 @app.get('/market/institutional')
 def institutional_flow():
-    if not _institutional:
-        return {'available': False, 'message': 'FII/DII figures not entered yet.'}
-    cash = (_institutional.get('fii_cash_net_cr', 0) or 0) + (_institutional.get('dii_cash_net_cr', 0) or 0)
-    longv = _institutional.get('fii_index_futures_long')
-    shortv = _institutional.get('fii_index_futures_short')
-    fut_bias = None
-    if longv is not None and shortv is not None and (longv + shortv) > 0:
-        fut_bias = round(100 * longv / (longv + shortv), 1)
-    call_oi = _institutional.get('fii_index_options_call_oi')
-    put_oi = _institutional.get('fii_index_options_put_oi')
-    option_bias = None
-    if call_oi is not None and put_oi is not None and (call_oi + put_oi) > 0:
-        option_bias = round(100 * put_oi / (call_oi + put_oi), 1)
-    return {'available': True, 'fii_dii_cash_net_cr': round(cash, 2),
-            'fii_cash_net_cr': _institutional.get('fii_cash_net_cr'),
-            'dii_cash_net_cr': _institutional.get('dii_cash_net_cr'),
-            'fii_futures_long_share_pct': fut_bias,
-            'fii_put_oi_share_pct': option_bias,
-            'interpretation': 'Positive combined cash flow can support sentiment; futures/options positioning is context, not a direct buy/sell signal.',
-            'source_note': 'Manual input; not a live institutional transaction feed.'}
+    try:
+        history, source = _get_fii_dii_data()
+        dates = sorted({str(x.get('date')) for x in history}, reverse=True)
+        last_dates = dates[:5]
+        daily = []
+        for day in last_dates:
+            day_rows = [x for x in history if str(x.get('date')) == day]
+            fii = next((x for x in day_rows if x.get('category') == 'FII'), None)
+            dii = next((x for x in day_rows if x.get('category') == 'DII'), None)
+            daily.append({
+                'date': day,
+                'fii_buy_cr': fii.get('buy_cr') if fii else None,
+                'fii_sell_cr': fii.get('sell_cr') if fii else None,
+                'fii_net_cr': fii.get('net_cr') if fii else None,
+                'dii_buy_cr': dii.get('buy_cr') if dii else None,
+                'dii_sell_cr': dii.get('sell_cr') if dii else None,
+                'dii_net_cr': dii.get('net_cr') if dii else None,
+                'combined_net_cr': round((fii.get('net_cr') or 0) + (dii.get('net_cr') or 0), 2) if fii or dii else None
+            })
+        total_fii = sum(x['fii_net_cr'] or 0 for x in daily if x['fii_net_cr'] is not None)
+        total_dii = sum(x['dii_net_cr'] or 0 for x in daily if x['dii_net_cr'] is not None)
+        combined = total_fii + total_dii
+        if len(daily) < 2:
+            bias = 'INSUFFICIENT HISTORY'
+        elif combined > 0:
+            bias = 'BULLISH BIAS'
+        elif combined < 0:
+            bias = 'BEARISH BIAS'
+        else:
+            bias = 'MIXED / NEUTRAL'
+        return {
+            'available': bool(daily), 'source': source,
+            'latest_date': last_dates[0] if last_dates else None,
+            'history_days_available': len(daily), 'target_history_days': 5,
+            'daily': daily, 'five_day_fii_net_cr': round(total_fii, 2),
+            'five_day_dii_net_cr': round(total_dii, 2),
+            'five_day_combined_net_cr': round(combined, 2),
+            'sentiment_bias': bias,
+            'note': 'NSE cash-market FII/FPI and DII activity is provisional and generally published after market close. Five-day history is accumulated by this service; after a fresh deployment/restart it may take up to five trading sessions to rebuild. Not an intraday flow feed or a CALL/PUT signal.'
+        }
+    except Exception as e:
+        return {
+            'available': False, 'source': 'NSE India',
+            'message': 'NSE FII/DII data could not be fetched right now.',
+            'detail': str(e),
+            'fallback': 'Try again later; do not enter zero values as a substitute.'
+        }
+
+@app.post('/market/institutional-refresh')
+def institutional_refresh():
+    _fii_cache['updated_at'] = None
+    _fii_cache['rows'] = None
+    return institutional_flow()
 
 @app.get('/market/big-move')
 def big_move():
@@ -286,4 +389,4 @@ def big_move():
 
 @app.get('/app', response_class=HTMLResponse)
 def dashboard():
-    return HTMLResponse('''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>KK NIFTY EARLY SIGNAL</title><style>body{font-family:Arial;background:#101827;color:#eef2ff;margin:0;padding:16px}.wrap{max-width:760px;margin:auto}h2{margin-bottom:4px}.muted{color:#aab6ca;font-size:13px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{background:#1d293b;padding:16px;border-radius:14px;margin:12px 0}.big{font-size:30px;font-weight:bold}.green{color:#4ade80}.red{color:#fb7185}button{background:#2563eb;color:white;border:0;border-radius:9px;padding:12px;width:100%;font-size:16px}input{width:100%;box-sizing:border-box;padding:10px;margin:5px 0;border-radius:8px;border:1px solid #475569;background:#0f172a;color:white}.row{display:flex;justify-content:space-between;gap:10px}</style></head><body><div class="wrap"><h2>KK NIFTY EARLY SIGNAL v3</h2><div class="muted">Market analysis dashboard · No auto trading · 5s refresh</div><div class="card"><div class="row"><b>NIFTY 50 LTP</b><span id="ltp">--</span></div><div class="muted" id="time">Waiting for market data</div></div><div class="grid"><div class="card"><b>1 Minute</b><div class="big" id="one">--</div><div id="oneput" class="muted">CALL / PUT</div></div><div class="card"><b>5 Minutes</b><div class="big" id="five">--</div><div id="fiveput" class="muted">CALL / PUT</div></div></div><div class="card"><b>15–20 Minute BIG MOVE Monitor</b><p id="bigmove">Waiting for live market candles.</p><p class="muted">5-second dashboard refresh; underlying candles and Kite data availability determine freshness.</p></div><div class="card"><b>FII / DII Flow</b><p id="fii">FII/DII figures not entered</p><p class="muted">Enter official figures; cash market data is generally published after market close.</p></div><div class="card"><b>FII / DII Data Entry</b><div class="muted">Official figures manually enter karein. Cash values ₹ crore mein; futures/OI values same units mein enter karein.</div><div class="grid"><label>FII Cash Net (₹ Cr)<input id="fii_cash_net_cr" type="number" step="0.01"></label><label>DII Cash Net (₹ Cr)<input id="dii_cash_net_cr" type="number" step="0.01"></label><label>FII Index Futures Long<input id="fii_index_futures_long" type="number" step="0.01"></label><label>FII Index Futures Short<input id="fii_index_futures_short" type="number" step="0.01"></label><label>FII Index Options Call OI<input id="fii_index_options_call_oi" type="number" step="0.01"></label><label>FII Index Options Put OI<input id="fii_index_options_put_oi" type="number" step="0.01"></label></div><button onclick="saveInstitutionalInputs()">Save FII / DII Data</button><p class="muted" id="fii_save"></p></div><div class="card"><b>Overnight Gap Forecast</b><p id="gap">Global inputs not entered yet.</p><p class="muted">Gap Up / Gap Down / Flat + estimated gap size</p></div><div class="card"><b>Next Day Outlook</b><p id="next">Awaiting overnight inputs.</p></div><div class="card"><b>Connection</b><p id="conn">Checking Zerodha...</p><button onclick="location.href='/zerodha/login'">Connect / Reconnect Zerodha</button></div><div class="card"><b>Overnight data entry</b><div class="muted">Enter percentage changes from previous close. Leave unknown fields blank.</div><div class="grid"><label>GIFT NIFTY %<input id="gift_nifty_pct" type="number" step="0.01"></label><label>US S&P 500 %<input id="us_sp500_pct" type="number" step="0.01"></label><label>Nasdaq %<input id="us_nasdaq_pct" type="number" step="0.01"></label><label>Asian markets %<input id="asian_markets_pct" type="number" step="0.01"></label><label>Crude change %<input id="crude_pct" type="number" step="0.01"></label><label>USD/INR change %<input id="usd_inr_pct" type="number" step="0.01"></label><label>India VIX change %<input id="india_vix_pct" type="number" step="0.01"></label><label>NIFTY close change %<input id="nifty_close_pct" type="number" step="0.01"></label></div><button onclick="saveInputs()">Save overnight inputs</button><p class="muted" id="save"></p></div><p class="muted">Percentages are rule-based estimates, not validated probabilities or guaranteed predictions. Verify all data and use risk limits.</p></div><script>async function get(u){let r=await fetch(u);return await r.json()}async function refresh(){try{let s=await get('/zerodha/status');document.getElementById('conn').textContent=s.connected?'Connected: '+(s.user_id||'Zerodha'):'Not connected — tap Connect';if(s.connected){let q=await get('/market/nifty/status');document.getElementById('ltp').textContent=q.last_price;document.getElementById('time').textContent=q.timestamp;let f=await get('/market/forecast');for(let [id,x] of [['one',f.one_minute],['five',f.five_minute]]){document.getElementById(id).textContent=x.call==null?'N/A':(x.trend+' '+x.call+'%');document.getElementById(id+'put').textContent=x.call==null?x.reason:('PUT '+x.put+'% · '+(x.no_trade?'NO TRADE':'Signal available')+' · '+x.warning)} }let bm=await get('/market/big-move');document.getElementById('bigmove').textContent=bm.available?(bm.alert+' · '+bm.direction+' · Strength '+bm.strength_score+'/100 · 20m change '+bm.return_last_20m_pct+'% · Vol '+bm.volume_ratio+'x'):bm.message;let fi=await get('/market/institutional');document.getElementById('fii').textContent=fi.available?('FII cash '+fi.fii_cash_net_cr+' cr · DII cash '+fi.dii_cash_net_cr+' cr · FII futures long share '+fi.fii_futures_long_share_pct+'%'):'FII/DII figures not entered';let o=await get('/market/overnight');document.getElementById('gap').textContent=o.available?('Gap Up '+o.gap_up+'% · Gap Down '+o.gap_down+'% · Flat '+o.flat+'% · Estimated gap '+o.gap_size_pct+'%'):'Inputs required';let n=await get('/market/next-day');document.getElementById('next').textContent=n.available?('Bullish '+n.bullish+'% · Bearish '+n.bearish+'% · Sideways '+n.sideways+'%'):'Not available until overnight inputs are entered.'}catch(e){document.getElementById('conn').textContent='Data unavailable: '+e.message}}async function saveInstitutionalInputs(){let keys=['fii_cash_net_cr','dii_cash_net_cr','fii_index_futures_long','fii_index_futures_short','fii_index_options_call_oi','fii_index_options_put_oi'];let d={};for(let k of keys){let v=document.getElementById(k).value;if(v!=='')d[k]=Number(v)}if(Object.keys(d).length===0){document.getElementById('fii_save').textContent='Pehle kam se kam ek value enter karein.';return}let r=await fetch('/market/institutional-inputs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});let result=await r.json();document.getElementById('fii_save').textContent=r.ok?'FII/DII data saved. Dashboard updating...':('Save failed: '+(result.detail||'Please check values'));if(r.ok)refresh()}async function saveInputs(){let keys=['gift_nifty_pct','us_sp500_pct','us_nasdaq_pct','asian_markets_pct','crude_pct','usd_inr_pct','india_vix_pct','nifty_close_pct'];let d={};for(let k of keys){let v=document.getElementById(k).value;if(v!=='')d[k]=Number(v)}let r=await fetch('/market/overnight-inputs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('save').textContent=r.ok?'Saved. Forecast updating...':'Could not save inputs';refresh()}refresh();setInterval(refresh,5000);</script></body></html>''')
+    return HTMLResponse('''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>KK NIFTY EARLY SIGNAL</title><style>body{font-family:Arial;background:#101827;color:#eef2ff;margin:0;padding:16px}.wrap{max-width:760px;margin:auto}h2{margin-bottom:4px}.muted{color:#aab6ca;font-size:13px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{background:#1d293b;padding:16px;border-radius:14px;margin:12px 0}.big{font-size:30px;font-weight:bold}.green{color:#4ade80}.red{color:#fb7185}button{background:#2563eb;color:white;border:0;border-radius:9px;padding:12px;width:100%;font-size:16px}input{width:100%;box-sizing:border-box;padding:10px;margin:5px 0;border-radius:8px;border:1px solid #475569;background:#0f172a;color:white}.row{display:flex;justify-content:space-between;gap:10px}</style></head><body><div class="wrap"><h2>KK NIFTY EARLY SIGNAL v4</h2><div class="muted">Market analysis dashboard · No auto trading · 5s refresh</div><div class="card"><div class="row"><b>NIFTY 50 LTP</b><span id="ltp">--</span></div><div class="muted" id="time">Waiting for market data</div></div><div class="grid"><div class="card"><b>1 Minute</b><div class="big" id="one">--</div><div id="oneput" class="muted">CALL / PUT</div></div><div class="card"><b>5 Minutes</b><div class="big" id="five">--</div><div id="fiveput" class="muted">CALL / PUT</div></div></div><div class="card"><b>15–20 Minute BIG MOVE Monitor</b><p id="bigmove">Waiting for live market candles.</p><p class="muted">5-second dashboard refresh; underlying candles and Kite data availability determine freshness.</p></div><div class="card"><b>FII / DII Flow</b><p id="fii">Loading NSE FII/DII data...</p><p class="muted" id="fii_trend">Five-day trend loading...</p><button onclick="refreshFii()">Refresh NSE FII / DII</button><p class="muted">NSE daily cash-market data; generally published after market close. Provisional, not live intraday data.</p></div><div class="card"><b>Overnight Gap Forecast</b><p id="gap">Global inputs not entered yet.</p><p class="muted">Gap Up / Gap Down / Flat + estimated gap size</p></div><div class="card"><b>Next Day Outlook</b><p id="next">Awaiting overnight inputs.</p></div><div class="card"><b>Connection</b><p id="conn">Checking Zerodha...</p><button onclick="location.href='/zerodha/login'">Connect / Reconnect Zerodha</button></div><div class="card"><b>Overnight data entry</b><div class="muted">Enter percentage changes from previous close. Leave unknown fields blank.</div><div class="grid"><label>GIFT NIFTY %<input id="gift_nifty_pct" type="number" step="0.01"></label><label>US S&P 500 %<input id="us_sp500_pct" type="number" step="0.01"></label><label>Nasdaq %<input id="us_nasdaq_pct" type="number" step="0.01"></label><label>Asian markets %<input id="asian_markets_pct" type="number" step="0.01"></label><label>Crude change %<input id="crude_pct" type="number" step="0.01"></label><label>USD/INR change %<input id="usd_inr_pct" type="number" step="0.01"></label><label>India VIX change %<input id="india_vix_pct" type="number" step="0.01"></label><label>NIFTY close change %<input id="nifty_close_pct" type="number" step="0.01"></label></div><button onclick="saveInputs()">Save overnight inputs</button><p class="muted" id="save"></p></div><p class="muted">Percentages are rule-based estimates, not validated probabilities or guaranteed predictions. Verify all data and use risk limits.</p></div><script>async function get(u){let r=await fetch(u);return await r.json()}async function refresh(){try{let s=await get('/zerodha/status');document.getElementById('conn').textContent=s.connected?'Connected: '+(s.user_id||'Zerodha'):'Not connected — tap Connect';if(s.connected){let q=await get('/market/nifty/status');document.getElementById('ltp').textContent=q.last_price;document.getElementById('time').textContent=q.timestamp;let f=await get('/market/forecast');for(let [id,x] of [['one',f.one_minute],['five',f.five_minute]]){document.getElementById(id).textContent=x.call==null?'N/A':(x.trend+' '+x.call+'%');document.getElementById(id+'put').textContent=x.call==null?x.reason:('PUT '+x.put+'% · '+(x.no_trade?'NO TRADE':'Signal available')+' · '+x.warning)} }let bm=await get('/market/big-move');document.getElementById('bigmove').textContent=bm.available?(bm.alert+' · '+bm.direction+' · Strength '+bm.strength_score+'/100 · 20m change '+bm.return_last_20m_pct+'% · Vol '+bm.volume_ratio+'x'):bm.message;let fi=await get('/market/institutional');document.getElementById('fii').textContent=fi.available?('Latest '+fi.latest_date+' · FII net ₹'+(fi.daily[0].fii_net_cr??'N/A')+' Cr · DII net ₹'+(fi.daily[0].dii_net_cr??'N/A')+' Cr · '+fi.sentiment_bias):('NSE data unavailable · '+(fi.message||'Try refresh'));document.getElementById('fii_trend').textContent=fi.available?('Available days '+fi.history_days_available+'/5 · 5-day FII ₹'+fi.five_day_fii_net_cr+' Cr · DII ₹'+fi.five_day_dii_net_cr+' Cr · Combined ₹'+fi.five_day_combined_net_cr+' Cr'): (fi.detail||'');let o=await get('/market/overnight');document.getElementById('gap').textContent=o.available?('Gap Up '+o.gap_up+'% · Gap Down '+o.gap_down+'% · Flat '+o.flat+'% · Estimated gap '+o.gap_size_pct+'%'):'Inputs required';let n=await get('/market/next-day');document.getElementById('next').textContent=n.available?('Bullish '+n.bullish+'% · Bearish '+n.bearish+'% · Sideways '+n.sideways+'%'):'Not available until overnight inputs are entered.'}catch(e){document.getElementById('conn').textContent='Data unavailable: '+e.message}}async function refreshFii(){let r=await fetch('/market/institutional-refresh',{method:'POST'});let d=await r.json();document.getElementById('fii').textContent=d.available?('Latest '+d.latest_date+' · FII net ₹'+(d.daily[0].fii_net_cr??'N/A')+' Cr · DII net ₹'+(d.daily[0].dii_net_cr??'N/A')+' Cr · '+d.sentiment_bias):('NSE data unavailable · '+(d.message||''));document.getElementById('fii_trend').textContent=d.available?('Available days '+d.history_days_available+'/5 · 5-day FII ₹'+d.five_day_fii_net_cr+' Cr · DII ₹'+d.five_day_dii_net_cr+' Cr · Combined ₹'+d.five_day_combined_net_cr+' Cr'):(d.detail||'');}async function saveInputs(){let keys=['gift_nifty_pct','us_sp500_pct','us_nasdaq_pct','asian_markets_pct','crude_pct','usd_inr_pct','india_vix_pct','nifty_close_pct'];let d={};for(let k of keys){let v=document.getElementById(k).value;if(v!=='')d[k]=Number(v)}let r=await fetch('/market/overnight-inputs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('save').textContent=r.ok?'Saved. Forecast updating...':'Could not save inputs';refresh()}refresh();setInterval(refresh,5000);</script></body></html>''')
