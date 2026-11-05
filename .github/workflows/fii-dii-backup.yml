@@ -1,0 +1,70 @@
+name: Daily NSE FII DII Backup
+
+on:
+  schedule:
+    - cron: "0 13 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch NSE data
+        env:
+          API_URL: https://kk-nifty-early-signal.onrender.com
+        run: |
+          mkdir -p data
+          curl --fail --silent --show-error \
+            --retry 3 --retry-delay 30 \
+            -X POST "$API_URL/market/institutional-refresh" \
+            -o /tmp/nse.json
+
+      - name: Save five-day history backup
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          response = json.loads(Path("/tmp/nse.json").read_text())
+          if not response.get("available"):
+              raise SystemExit("NSE data unavailable; backup not updated")
+
+          path = Path("data/fii_dii_history.json")
+          old = json.loads(path.read_text()) if path.exists() else []
+
+          records = {
+              item["date"]: item
+              for item in old
+              if isinstance(item, dict) and item.get("date")
+          }
+
+          for item in response.get("daily", []):
+              if item.get("date"):
+                  records[item["date"]] = item
+
+          history = sorted(
+              records.values(),
+              key=lambda x: x["date"],
+              reverse=True
+          )[:30]
+
+          path.write_text(json.dumps(history, indent=2))
+          print("Saved dates:", [x["date"] for x in history])
+          PY
+
+      - name: Commit backup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/fii_dii_history.json
+          git diff --cached --quiet || (
+            git commit -m "Update daily NSE FII DII backup" &&
+            git push
+          )
