@@ -1,5 +1,15 @@
 [
   {
+    "date": "09-Nov-2026",
+    "fii_buy_cr": 20310.99,
+    "fii_sell_cr": 13098.77,
+    "fii_net_cr": 7212.22,
+    "dii_buy_cr": 12764.97,
+    "dii_sell_cr": 19937.5,
+    "dii_net_cr": -7172.53,
+    "combined_net_cr": 39.69
+  },
+  {
     "date": "06-Nov-2026",
     "fii_buy_cr": 30455.63,
     "fii_sell_cr": 16705.81,
