@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from kiteconnect import KiteConnect
 
-app = FastAPI(title='KK NIFTY EARLY SIGNAL v3', version='4.0.0')
+app = FastAPI(title='KK NIFTY EARLY SIGNAL v5', version='4.0.0')
 IST = ZoneInfo('Asia/Kolkata')
 API_KEY = os.getenv('KITE_API_KEY', '')
 API_SECRET = os.getenv('KITE_API_SECRET', '')
