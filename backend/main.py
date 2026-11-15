@@ -672,6 +672,40 @@ async function loadChart() {
     rows.sort((a,b) => a.time-b.time);
     if (!rows.length) throw new Error('No candle data received');
     candles.setData(rows);
+            const fr = await fetch('/market/forecast');
+        if (fr.ok) {
+          const f = await fr.json();
+          const signals = [];
+          const lastTime = rows[rows.length - 1].time;
+
+          function addSignal(p, label) {
+            if (!p) return;
+            const call = Number(p.call);
+            const put = Number(p.put);
+
+            if (call >= 60 && call > put) {
+              signals.push({
+                time: lastTime,
+                position: 'belowBar',
+                color: '#16c784',
+                shape: 'arrowUp',
+                text: label + ' CALL'
+              });
+            } else if (put >= 60 && put > call) {
+              signals.push({
+                time: lastTime,
+                position: 'aboveBar',
+                color: '#ea3943',
+                shape: 'arrowDown',
+                text: label + ' PUT'
+              });
+            }
+          }
+
+          addSignal(f.one_minute, '1m');
+          addSignal(f.five_minute, '5m');
+          candles.setMarkers(signals);
+        }
     chart.timeScale().fitContent();
     document.getElementById('status').textContent =
       'NIFTY 50 | Candles: ' + rows.length;
