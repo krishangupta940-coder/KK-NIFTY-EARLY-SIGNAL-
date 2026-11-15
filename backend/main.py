@@ -631,6 +631,13 @@ h2 { padding:12px; }
 <body>
 <h2>KK NIFTY EARLY SIGNAL - LIVE CHART</h2>
 <div id="status">Loading NIFTY candles...</div>
+<div style="padding:12px;line-height:2;font-size:14px;background:#10243a;">
+  🟢 CALL = तेजी का संकेत<br>
+  🔴 PUT = मंदी का संकेत<br>
+  🔵 SUPPORT / RESISTANCE = महत्वपूर्ण स्तर<br>
+  🟡 NEWS / EVENT = बड़ी खबर या आर्थिक घटना<br>
+  ⚪ WAIT = अभी ट्रेड न लें
+</div>
 <div id="chart"></div>
 <script>
 const el = document.getElementById('chart');
