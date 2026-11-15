@@ -657,7 +657,7 @@ const candles = chart.addCandlestickSeries({
 });
 async function loadChart() {
   try {
-    const r = await fetch('/market/candles?interval=minute&days=1');
+    const r = await fetch('/market/candles?interval=minute&days=5');
     if (!r.ok) throw new Error('Candle API error: ' + r.status);
     const data = await r.json();
     const rows = (data.candles || []).map(x => ({
