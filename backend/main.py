@@ -679,6 +679,27 @@ async function loadChart() {
     rows.sort((a,b) => a.time-b.time);
     if (!rows.length) throw new Error('No candle data received');
     candles.setData(rows);
+    const recent = rows.slice(-100);
+const support = Math.min(...recent.map(x => x.low));
+const resistance = Math.max(...recent.map(x => x.high));
+
+candles.createPriceLine({
+  price: support,
+  color: '#008cff',
+  lineWidth: 2,
+  lineStyle: 2,
+  axisLabelVisible: true,
+  title: 'SUPPORT'
+});
+
+candles.createPriceLine({
+  price: resistance,
+  color: '#008cff',
+  lineWidth: 2,
+  lineStyle: 2,
+  axisLabelVisible: true,
+  title: 'RESISTANCE'
+});
             const fr = await fetch('/market/forecast');
         if (fr.ok) {
           const f = await fr.json();
