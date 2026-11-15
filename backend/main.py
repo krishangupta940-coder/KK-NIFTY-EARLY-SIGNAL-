@@ -611,3 +611,80 @@ def ai_chat(data: AIChatRequest):
 
     except Exception as e:
         raise HTTPException(502, f'AI Chat error: {str(e)}')
+
+@app.get('/chart', response_class=HTMLResponse)
+def nifty_chart():
+    return HTMLResponse("""
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KK NIFTY LIVE CHART</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+body { margin:0; background:#0b1729; color:white; font-family:Arial; }
+h2 { padding:12px; }
+#chart { width:100%; height:65vh; }
+#status { padding:12px; color:#b9c8dc; }
+</style>
+</head>
+<body>
+<h2>KK NIFTY EARLY SIGNAL - LIVE CHART</h2>
+<div id="status">Loading NIFTY candles...</div>
+<div id="chart"></div>
+<script>
+const el = document.getElementById('chart');
+const chart = LightweightCharts.createChart(el, {
+  width: el.clientWidth,
+  height: el.clientHeight,
+  layout: {
+    background: { color: '#0b1729' },
+    textColor: '#dce6f5'
+  },
+  grid: {
+    vertLines: { color: '#24344a' },
+    horzLines: { color: '#24344a' }
+  },
+  timeScale: { timeVisible: true, secondsVisible: false }
+});
+const candles = chart.addCandlestickSeries({
+  upColor: '#16c784',
+  downColor: '#ea3943',
+  borderUpColor: '#16c784',
+  borderDownColor: '#ea3943',
+  wickUpColor: '#16c784',
+  wickDownColor: '#ea3943'
+});
+async function loadChart() {
+  try {
+    const r = await fetch('/market/candles?interval=minute&days=1');
+    if (!r.ok) throw new Error('Candle API error: ' + r.status);
+    const data = await r.json();
+    const rows = (data.candles || []).map(x => ({
+      time: Math.floor(new Date(x.date).getTime()/1000),
+      open: Number(x.open),
+      high: Number(x.high),
+      low: Number(x.low),
+      close: Number(x.close)
+    })).filter(x => Number.isFinite(x.time) &&
+      Number.isFinite(x.open) && Number.isFinite(x.high) &&
+      Number.isFinite(x.low) && Number.isFinite(x.close));
+    rows.sort((a,b) => a.time-b.time);
+    if (!rows.length) throw new Error('No candle data received');
+    candles.setData(rows);
+    chart.timeScale().fitContent();
+    document.getElementById('status').textContent =
+      'NIFTY 50 | Candles: ' + rows.length;
+  } catch(e) {
+    document.getElementById('status').textContent = e.message;
+  }
+}
+loadChart();
+window.addEventListener('resize', () => {
+  chart.applyOptions({width: el.clientWidth, height: el.clientHeight});
+});
+</script>
+</body>
+</html>
+""")
+    
