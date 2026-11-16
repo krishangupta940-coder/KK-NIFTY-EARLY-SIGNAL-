@@ -463,6 +463,74 @@ def big_move():
         raise HTTPException(503, f'Big-move analysis unavailable: {e}')
 
 
+@app.get('/market/15day-outlook')
+def fifteen_day_outlook():
+    k = kite_client()
+    if not k:
+        raise HTTPException(503, 'Zerodha login required')
+
+    try:
+        end = datetime.now(IST)
+        start = end - timedelta(days=120)
+
+        rows = k.historical_data(256265, start, end, 'day')
+        df = pd.DataFrame(rows)
+
+        if len(df) < 55:
+            return {
+                'available': False,
+                'message': 'Not enough daily candles',
+                'candles': len(df)
+            }
+
+        close = df['close'].astype(float)
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+
+        ema20 = close.ewm(span=20, adjust=False).mean()
+        ema50 = close.ewm(span=50, adjust=False).mean()
+
+        change15 = (
+            (close.iloc[-1] / close.iloc[-16]) - 1
+        ) * 100
+
+        score = 0
+        score += 1 if close.iloc[-1] > ema20.iloc[-1] else -1
+        score += 1 if ema20.iloc[-1] > ema50.iloc[-1] else -1
+        score += 1 if change15 > 0 else -1
+        score += 1 if change15 > 1 else (-1 if change15 < -1 else 0)
+
+        direction = (
+            'BULLISH' if score >= 2
+            else 'BEARISH' if score <= -2
+            else 'NEUTRAL'
+        )
+
+        support = float(low.tail(15).min())
+        resistance = float(high.tail(15).max())
+
+        return {
+            'available': True,
+            'window_trading_days': 15,
+            'direction': direction,
+            'trend_score': score,
+            'strength_score': min(90, max(10, 50 + score * 10)),
+            'change_15_sessions_pct': round(float(change15), 2),
+            'last_close': round(float(close.iloc[-1]), 2),
+            'ema20': round(float(ema20.iloc[-1]), 2),
+            'ema50': round(float(ema50.iloc[-1]), 2),
+            'support_15_sessions': round(support, 2),
+            'resistance_15_sessions': round(resistance, 2),
+            'alert': 'EARLY WATCH' if abs(score) >= 3 else 'NORMAL WATCH',
+            'note': 'Daily trend indicator, not a guaranteed 15-day prediction or probability.'
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            503,
+            f'15-day outlook unavailable: {e}'
+        )
+        
 @app.get('/app', response_class=HTMLResponse)
 def dashboard():
     return HTMLResponse('''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>KK NIFTY EARLY SIGNAL</title><style>body{font-family:Arial;background:#101827;color:#eef2ff;margin:0;padding:16px}.wrap{max-width:760px;margin:auto}h2{margin-bottom:4px}.muted{color:#aab6ca;font-size:13px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{background:#1d293b;padding:16px;border-radius:14px;margin:12px 0}.big{font-size:30px;font-weight:bold}.green{color:#4ade80}.red{color:#fb7185}button{background:#2563eb;color:white;border:0;border-radius:9px;padding:12px;width:100%;font-size:16px}input{width:100%;box-sizing:border-box;padding:10px;margin:5px 0;border-radius:8px;border:1px solid #475569;background:#0f172a;color:white}.row{display:flex;justify-content:space-between;gap:10px}</style></head><body><div class="wrap"><div id="nifty-chart" style="width:100%;height:420px;background:#0f172a;border-radius:12px;margin:16px 0;"></div>
