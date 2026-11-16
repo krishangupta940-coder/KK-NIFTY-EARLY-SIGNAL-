@@ -800,6 +800,61 @@ candles.createPriceLine({
 
           addSignal(f.one_minute, '1m');
           addSignal(f.five_minute, '5m');
+         
+// 15-20 minute Big Move marker
+try {
+    const bmRes = await fetch('/market/big-move');
+    if (bmRes.ok) {
+        const bm = await bmRes.json();
+        if (bm.available && bm.direction === 'BULLISH') {
+            signals.push({
+                time: lastTime,
+                position: 'belowBar',
+                color: '#facc15',
+                shape: 'arrowUp',
+                text: '15-20m BIG MOVE WATCH'
+            });
+        } else if (bm.available && bm.direction === 'BEARISH') {
+            signals.push({
+                time: lastTime,
+                position: 'aboveBar',
+                color: '#facc15',
+                shape: 'arrowDown',
+                text: '15-20m BIG MOVE WATCH'
+            });
+        }
+    }
+} catch (e) {
+    console.log('Big move data unavailable');
+}
+
+// 15 trading day Outlook marker
+try {
+    const dayRes = await fetch('/market/15day-outlook');
+    if (dayRes.ok) {
+        const day = await dayRes.json();
+        if (day.available && day.direction === 'BULLISH') {
+            signals.push({
+                time: lastTime,
+                position: 'belowBar',
+                color: '#16c784',
+                shape: 'circle',
+                text: '15 DAY BULLISH WATCH'
+            });
+        } else if (day.available && day.direction === 'BEARISH') {
+            signals.push({
+                time: lastTime,
+                position: 'aboveBar',
+                color: '#ea3943',
+                shape: 'circle',
+                text: '15 DAY BEARISH WATCH'
+            });
+        }
+    }
+} catch (e) {
+    console.log('15-day data unavailable');
+}
+
           candles.setMarkers(signals);
         }
     chart.timeScale().fitContent();
