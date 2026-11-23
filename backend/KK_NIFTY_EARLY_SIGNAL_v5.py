@@ -130,52 +130,123 @@ def indicators(df):
     return ema9,ema21,ema50,rsi,atr,macd,sig
 
 
-def directional_prob(df, horizon):
-    """Directional heuristic for the next N one-minute candles; not a calibrated probability."""
-    if len(df) < 55:
+ def directional_prob(df, horizon):
+    """Rule-based directional signal with trend, momentum and volume checks."""
+
+    if df is None or len(df) < 55:
         return {
-            'call': None, 'put': None, 'no_trade': True,
-            'reason': 'कम से कम 55 one-minute candles उपलब्ध नहीं हैं',
+            'call': None,
+            'put': None,
+            'no_trade': True,
+            'reason': 'कम से कम 55 candles जरूरी हैं',
             'horizon_minutes': horizon
         }
 
-    e9, e21, e50, rsi, atr, macd, sig = indicators(df)
-    close = df['close'].astype(float)
-    lookback = max(2, min(int(horizon), 20))
-    slope = float(e9.iloc[-1] - e9.iloc[-1-lookback])
-    momentum = (float(close.iloc[-1]) / float(close.iloc[-1-lookback]) - 1) * 100
-    score = 0.0
+    try:
+        e9, e21, e50, rsi, atr, macd, sig = indicators(df)
 
-    score += 1.2 if e9.iloc[-1] > e21.iloc[-1] else -1.2
-    score += 0.8 if e21.iloc[-1] > e50.iloc[-1] else -0.8
-    score += 0.7 if macd.iloc[-1] > sig.iloc[-1] else -0.7
-    score += 0.5 if rsi.iloc[-1] > 55 else (-0.5 if rsi.iloc[-1] < 45 else 0)
-    score += 0.6 if slope > 0 else (-0.6 if slope < 0 else 0)
-    score += 0.6 if momentum > 0.03 else (-0.6 if momentum < -0.03 else 0)
+        close = df['close'].astype(float)
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+        volume = df['volume'].fillna(0)
 
-    score = max(-4.4, min(4.4, score))
-    call_score = round(100 / (1 + math.exp(-score * 0.48)))
-    put_score = 100 - call_score
-    confidence = abs(call_score - 50) * 2
-    trend = 'BULLISH' if call_score >= 58 else ('BEARISH' if put_score >= 58 else 'SIDEWAYS')
-    weakening = ((e9.iloc[-1] > e21.iloc[-1] and slope < 0) or
-                 (e9.iloc[-1] < e21.iloc[-1] and slope > 0))
-    return {
-        'horizon_minutes': horizon,
-        'call': call_score,
-        'put': put_score,
-        'no_trade': confidence < 18 or trend == 'SIDEWAYS',
-        'confidence_score': round(confidence),
-        'rsi': round(float(rsi.iloc[-1]), 1),
-        'ema9': round(float(e9.iloc[-1]), 2),
-        'ema21': round(float(e21.iloc[-1]), 2),
-        'ema50': round(float(e50.iloc[-1]), 2),
-        'atr': round(float(atr.iloc[-1]), 2) if pd.notna(atr.iloc[-1]) else None,
-        'momentum_pct': round(momentum, 4),
-        'trend': trend,
-        'warning': 'Trend weakening' if weakening else 'No reversal warning',
-        'method': 'Rule-based directional score; not a calibrated win probability'
-    }
+        lookback = max(2, min(int(horizon), 20))
+
+        price = float(close.iloc[-1])
+        prev_price = float(close.iloc[-lookback - 1])
+
+        momentum = ((price / prev_price) - 1) * 100
+        slope = float(e9.iloc[-1] - e9.iloc[-lookback])
+
+        score = 0.0
+
+        # EMA trend
+        score += 1.2 if e9.iloc[-1] > e21.iloc[-1] else -1.2
+        score += 0.8 if e21.iloc[-1] > e50.iloc[-1] else -0.8
+
+        # MACD trend
+        score += 0.7 if macd.iloc[-1] > sig.iloc[-1] else -0.7
+
+        # RSI
+        r = float(rsi.iloc[-1])
+        if r > 55:
+            score += 0.5
+        elif r < 45:
+            score -= 0.5
+
+        # EMA movement
+        score += 0.6 if slope > 0 else (-0.6 if slope < 0 else 0)
+
+        # Momentum
+        score += 0.6 if momentum > 0.03 else (
+            -0.6 if momentum < -0.03 else 0
+        )
+
+        # Candle strength
+        candle_range = max(float(high.iloc[-1] - low.iloc[-1]), 1e-9)
+        body = float(close.iloc[-1] - close.iloc[-2])
+
+        if body > 0 and close.iloc[-1] > close.iloc[-2]:
+            score += 0.3
+        elif body < 0 and close.iloc[-1] < close.iloc[-2]:
+            score -= 0.3
+
+        # Volume confirmation
+        avg_volume = float(volume.tail(20).mean())
+        current_volume = float(volume.iloc[-1])
+
+        if avg_volume > 0 and current_volume > avg_volume * 1.2:
+            score += 0.3 if close.iloc[-1] > close.iloc[-2] else -0.3
+
+        # Limit score
+        score = max(-4.7, min(4.7, score))
+
+        # Directional score (not actual statistical probability)
+        call_score = round(100 / (1 + math.exp(-score * 0.45)))
+        put_score = 100 - call_score
+
+        confidence = abs(call_score - 50) * 2
+
+        trend = (
+            'BULLISH' if call_score >= 58
+            else 'BEARISH' if put_score >= 58
+            else 'SIDEWAYS'
+        )
+
+        weakening = (
+            (e9.iloc[-1] > e21.iloc[-1] and slope < 0)
+            or (e9.iloc[-1] < e21.iloc[-1] and slope > 0)
+        )
+
+        no_trade = confidence < 18 or trend == 'SIDEWAYS'
+
+        return {
+            'horizon_minutes': horizon,
+            'call': call_score,
+            'put': put_score,
+            'no_trade': no_trade,
+            'confidence_score': round(confidence),
+            'rsi': round(r, 1),
+            'ema9': round(float(e9.iloc[-1]), 2),
+            'ema21': round(float(e21.iloc[-1]), 2),
+            'ema50': round(float(e50.iloc[-1]), 2),
+            'atr': round(float(atr.iloc[-1]), 2)
+                if pd.notna(atr.iloc[-1]) else None,
+            'momentum_pct': round(momentum, 4),
+            'trend': trend,
+            'warning': 'Trend weakening' if weakening
+                else 'No reversal warning',
+            'method': 'Multi-indicator heuristic score; not a calibrated probability'
+        }
+
+    except Exception as e:
+        return {
+            'call': None,
+            'put': None,
+            'no_trade': True,
+            'reason': f'Analysis error: {str(e)}',
+            'horizon_minutes': horizon
+        }
 
 
 @app.get('/market/forecast')
