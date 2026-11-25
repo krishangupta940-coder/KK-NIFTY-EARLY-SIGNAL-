@@ -9,7 +9,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from kiteconnect import KiteConnect
-
+def _date_sort_key(value):
+    for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(str(value), fmt)
+        except ValueError:
+            pass
+    return datetime.min
 app = FastAPI(title='KK NIFTY EARLY SIGNAL v5', version='5.0.0')
 IST = ZoneInfo('Asia/Kolkata')
 API_KEY = os.getenv('KITE_API_KEY', '')
@@ -403,7 +409,10 @@ def next_day():
 # NSE daily FII/FPI and DII cash-market activity.
 # NSE's public endpoint is not a guaranteed API; access can be rate-limited or changed.
 _NSE_FII_DII_URL = 'https://www.nseindia.com/api/fiidiiTradeReact'
-_FII_HISTORY_FILE = os.getenv('FII_HISTORY_FILE', '/tmp/kk_fii_dii_history.json')
+_FII_HISTORY_FILE = os.getenv(
+    'FII_HISTORY_FILE',
+    '/var/data/kk_fii_dii_history.json'
+)
 _fii_cache = {'updated_at': None, 'rows': None}
 _fii_lock = threading.Lock()
 
@@ -478,7 +487,11 @@ def _get_fii_dii_data(force=False):
         by_key = {(str(x.get('date')), x.get('category')): x for x in history if isinstance(x, dict)}
         for row in latest:
             by_key[(str(row['date']), row['category'])] = row
-        history = sorted(by_key.values(), key=lambda x: str(x.get('date')), reverse=True)[:30]
+        history = sorted(
+    by_key.values(),
+    key=lambda x: _date_sort_key(x.get('date')),
+    reverse=True
+)[:30]
         _save_fii_history(history)
         _fii_cache['updated_at'] = now
         _fii_cache['rows'] = history
@@ -488,7 +501,11 @@ def _get_fii_dii_data(force=False):
 def institutional_flow():
     try:
         history, source = _get_fii_dii_data()
-        dates = sorted({str(x.get('date')) for x in history}, reverse=True)
+        dates = sorted(
+    {str(x.get('date')) for x in history},
+    key=_date_sort_key,
+    reverse=True
+        )
         last_dates = dates[:5]
         daily = []
         for day in last_dates:
