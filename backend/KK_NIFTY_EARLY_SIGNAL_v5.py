@@ -136,7 +136,7 @@ def indicators(df):
     return ema9,ema21,ema50,rsi,atr,macd,sig
 
 
- def directional_prob(df, horizon):
+def directional_prob(df, horizon):
     """Rule-based directional signal with trend, momentum and volume checks."""
 
     if df is None or len(df) < 55:
