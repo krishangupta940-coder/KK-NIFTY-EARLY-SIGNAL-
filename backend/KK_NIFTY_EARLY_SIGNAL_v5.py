@@ -224,7 +224,7 @@ def directional_prob(df, horizon):
             or (e9.iloc[-1] < e21.iloc[-1] and slope > 0)
         )
 
-        no_trade = confidence < 18 or trend == 'SIDEWAYS'
+        no_trade = confidence < 30 or trend == 'SIDEWAYS' or weakening
 
         return {
             'horizon_minutes': horizon,
